@@ -17,6 +17,7 @@ if not exist node_modules (
   )
 )
 
-echo Aster Finance Lab demarre. Ouvrez http://127.0.0.1:5173 dans votre navigateur.
+echo Aster Intelligence Lab demarre. Ollama sera lance automatiquement si necessaire.
+echo Ouvrez http://127.0.0.1:5173 dans votre navigateur.
 call npm run dev
 pause

@@ -5,7 +5,7 @@ Application indépendante de l’ERP Antigravity, avec un assistant général un
 ## Prérequis
 
 - Node.js 20+
-- [Ollama](https://ollama.com/) installé et démarré
+- [Ollama](https://ollama.com/) installé
 - Un modèle Ollama installé
 
 Modèle ouvert spécialisé finance proposé :
@@ -24,7 +24,7 @@ L’application sélectionne automatiquement le modèle Finance Llama lorsqu’i
 
 ## Démarrer
 
-Sous Windows, double-cliquer sur `Lancer Aster Finance Lab.cmd`, puis ouvrir `http://127.0.0.1:5173`. Ou démarrer depuis PowerShell :
+Sous Windows, double-cliquer sur `Lancer Aster Finance Lab.cmd`, puis ouvrir `http://127.0.0.1:5173`. Le démarrage de développement lance automatiquement `ollama serve` si Ollama est installé mais ne répond pas. Ou démarrer depuis PowerShell :
 
 ```powershell
 npm install
