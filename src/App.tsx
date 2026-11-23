@@ -617,9 +617,9 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#" aria-label="Aster Finance, accueil">
+        <a className="brand" href="#" aria-label="Aster, accueil">
           <span className="brand-mark">A</span>
-          <span><strong>aster</strong><small>FINANCE LAB</small></span>
+          <span><strong>aster</strong><small>INTELLIGENCE LAB</small></span>
         </a>
         <div className="sidebar-label">ESPACE DE TRAVAIL</div>
         <button className={`nav-item ${view === "chat" ? "active" : ""}`} onClick={() => setView("chat")}>
@@ -650,7 +650,7 @@ function App() {
           <div><strong>{connected ? "IA locale active" : "IA hors ligne"}</strong><small>{connected ? "Chat local · recherches externes" : "Vérifiez Ollama"}</small></div>
           <button className="refresh-button" title="Actualiser l’état" onClick={() => void refreshStatus()}>↻</button>
         </div>
-        <div className="sidebar-footer">Aster Finance Lab <span>v0.1 · prototype</span></div>
+        <div className="sidebar-footer">Aster Intelligence Lab <span>v0.1 · prototype</span></div>
       </aside>
 
       <main className="main-area">

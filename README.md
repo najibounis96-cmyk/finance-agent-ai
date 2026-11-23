@@ -1,4 +1,4 @@
-# Aster Finance Lab
+# Aster Intelligence Lab
 
 Application indépendante de l’ERP Antigravity, avec un assistant général universel, des agents financiers spécialisés, une bibliothèque locale généraliste et un agent de build.
 
