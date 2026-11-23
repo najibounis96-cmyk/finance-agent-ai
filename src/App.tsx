@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "./App.css";
 
 type Model = { name: string; size: number };
-type Message = { id: string; role: "user" | "assistant"; content: string };
-type Agent = "finance" | "markets";
+type MessageAttachment = { id: string; name: string; mimeType: string; size: number; kind: "text" | "image"; previewUrl?: string };
+type Message = { id: string; role: "user" | "assistant"; content: string; attachments?: MessageAttachment[] };
+type PendingAttachment = MessageAttachment & { content: string };
+type Agent = "finance" | "markets" | "portfolio";
 type Quote = {
   symbol: string;
   price: number;
@@ -16,6 +19,24 @@ type Quote = {
   source: string;
 };
 type ResearchSource = { title: string; publisher: string; url: string; publishedAt: string; snippet: string };
+type LibraryEntry = {
+  id: string;
+  title: string;
+  publisher: string;
+  publishedAt: string;
+  url: string;
+  snippet: string;
+  category: string;
+  retrievedAt: string;
+};
+type LibraryState = {
+  entries: LibraryEntry[];
+  totalEntries: number;
+  lastSyncAt: string | null;
+  nextSyncAt: string | null;
+  syncWarnings: string[];
+  autoRefreshHours: number;
+};
 
 const AGENTS: Record<Agent, { title: string; subtitle: string; icon: string; prompts: string[] }> = {
   finance: {
@@ -38,8 +59,31 @@ const AGENTS: Record<Agent, { title: string; subtitle: string; icon: string; pro
       "Propose une grille de diligence pour analyser une action cotée.",
     ],
   },
+  portfolio: {
+    title: "Analyste portefeuille",
+    subtitle: "Diversification, risque, budget et finances personnelles",
+    icon: "◉",
+    prompts: [
+      "Comment mesurer les concentrations et les risques de mon portefeuille ?",
+      "Aide-moi à structurer un budget et mon fonds d’urgence.",
+      "Quels scénarios de baisse devrais-je tester pour mon portefeuille ?",
+    ],
+  },
 };
 
+const MAX_ATTACHMENTS = 10;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_ATTACHMENT_TEXT_CHARS = 24_000;
+const MAX_PDF_PAGES = 20;
+const MAX_PDF_BYTES = 10 * 1024 * 1024;
+const TEXT_FILE_TYPES: Record<string, string> = {
+  txt: "text/plain", log: "text/plain", md: "text/markdown", csv: "text/csv", tsv: "text/tab-separated-values",
+  json: "application/json", xml: "application/xml", html: "text/html", htm: "text/html", css: "text/css",
+  js: "text/javascript", jsx: "text/javascript", ts: "application/typescript", tsx: "application/typescript",
+  py: "text/x-python", sql: "text/plain", yaml: "text/plain", yml: "text/plain", toml: "text/plain",
+};
+const IMAGE_TYPES: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
 const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const formatSize = (bytes: number) => bytes >= 1024 ** 3
   ? `${(bytes / 1024 ** 3).toFixed(1)} Go`
@@ -49,6 +93,34 @@ const cleanFileProposal = (value: string) => value
   .replace(/^```[a-zA-Z0-9_-]*\s*\n/, "")
   .replace(/\n```$/, "")
   .trim();
+
+async function extractPdfText(file: File) {
+  const pdfjs = await import("pdfjs-dist");
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+  const loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
+  try {
+    const document = await loadingTask.promise;
+    if (document.numPages > MAX_PDF_PAGES) throw new Error(`Le PDF dépasse la limite de ${MAX_PDF_PAGES} pages.`);
+    const pages: string[] = [];
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const text = await page.getTextContent();
+      pages.push(text.items.map((item) => "str" in item ? item.str : "").join(" "));
+    }
+    return pages.join("\n").trim();
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
+function readImageAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Lecture de l’image impossible."));
+    reader.onerror = () => reject(new Error("Lecture de l’image impossible."));
+    reader.readAsDataURL(file);
+  });
+}
 
 async function readError(response: Response) {
   try {
@@ -60,16 +132,28 @@ async function readError(response: Response) {
 }
 
 function App() {
-  const [view, setView] = useState<"chat" | "build">("chat");
+  const [view, setView] = useState<"chat" | "build" | "library">("chat");
   const [agent, setAgent] = useState<Agent>("finance");
   const [models, setModels] = useState<Model[]>([]);
   const [model, setModel] = useState("");
   const [connected, setConnected] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Connexion au moteur local…");
-  const [chatSessions, setChatSessions] = useState<Record<Agent, Message[]>>({ finance: [], markets: [] });
+  const [chatSessions, setChatSessions] = useState<Record<Agent, Message[]>>({ finance: [], markets: [], portfolio: [] });
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const [successNotice, setSuccessNotice] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [libraryEntries, setLibraryEntries] = useState<LibraryEntry[]>([]);
+  const [libraryTotal, setLibraryTotal] = useState(0);
+  const [libraryUpdatedAt, setLibraryUpdatedAt] = useState<string | null>(null);
+  const [libraryNextUpdateAt, setLibraryNextUpdateAt] = useState<string | null>(null);
+  const [libraryWarnings, setLibraryWarnings] = useState<string[]>([]);
+  const [librarySyncing, setLibrarySyncing] = useState(false);
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryError, setLibraryError] = useState("");
   const [workspace, setWorkspace] = useState("demo-project");
   const [workspaces, setWorkspaces] = useState<string[]>([]);
   const [filePath, setFilePath] = useState("src/hello.ts");
@@ -88,7 +172,12 @@ function App() {
   const [includeEvidence, setIncludeEvidence] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const filesInputRef = useRef<HTMLInputElement>(null);
+  const imagesInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const libraryDebounceRef = useRef<number | null>(null);
   const messages = chatSessions[agent];
+  const agentColor = agent === "finance" ? "violet" : agent === "markets" ? "teal" : "gold";
   const updateMessages = (update: (current: Message[]) => Message[]) => {
     setChatSessions((current) => ({ ...current, [agent]: update(current[agent]) }));
   };
@@ -132,6 +221,36 @@ function App() {
     });
     return () => { active = false; };
   }, [refreshStatus]);
+
+  const loadLibrary = useCallback(async (query = "") => {
+    try {
+      const response = await fetch(`/api/library${query.trim() ? `?${new URLSearchParams({ q: query.trim() })}` : ""}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(await readError(response));
+      const library = await response.json() as LibraryState;
+      setLibraryError("");
+      setLibraryEntries(library.entries);
+      setLibraryTotal(library.totalEntries);
+      setLibraryUpdatedAt(library.lastSyncAt);
+      setLibraryNextUpdateAt(library.nextSyncAt);
+      setLibraryWarnings(library.syncWarnings);
+    } catch (reason) {
+      setLibraryError(reason instanceof Error ? reason.message : "Lecture de la bibliothèque impossible.");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (libraryDebounceRef.current !== null) window.clearTimeout(libraryDebounceRef.current);
+    libraryDebounceRef.current = window.setTimeout(() => { void loadLibrary(libraryQuery); }, 250);
+    return () => {
+      if (libraryDebounceRef.current !== null) window.clearTimeout(libraryDebounceRef.current);
+    };
+  }, [libraryQuery, loadLibrary]);
+
+  useEffect(() => {
+    if (view !== "library") return;
+    const timer = window.setInterval(() => { void loadLibrary(libraryQuery); }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [view, libraryQuery, loadLibrary]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -185,11 +304,87 @@ function App() {
     }
   };
 
+  const addAttachments = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setAttachmentMenuOpen(false);
+    setAttachmentBusy(true);
+    setError("");
+    const added: PendingAttachment[] = [];
+    const failures: string[] = [];
+    let textChars = pendingAttachments.reduce((total, item) => total + (item.kind === "text" ? item.content.length : 0), 0);
+    let imageBytes = pendingAttachments.reduce((total, item) => total + (item.kind === "image" ? item.size : 0), 0);
+    let imageCount = pendingAttachments.filter((item) => item.kind === "image").length;
+    try {
+      for (const file of Array.from(files)) {
+        const name = (file.webkitRelativePath || file.name).replace(/[\r\n]/g, " ").slice(0, 240);
+        const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+        const currentCount = pendingAttachments.length + added.length;
+        if (currentCount >= MAX_ATTACHMENTS) {
+          failures.push(`Maximum ${MAX_ATTACHMENTS} pièces jointes par message.`);
+          break;
+        }
+        try {
+          if (IMAGE_TYPES[extension] && (file.type === IMAGE_TYPES[extension] || !file.type)) {
+            if (file.size === 0 || file.size > MAX_IMAGE_BYTES) throw new Error("Image vide ou supérieure à 4 Mo.");
+            if (imageCount >= 5 || imageBytes + file.size > MAX_TOTAL_IMAGE_BYTES) throw new Error("Limite de 5 images et 8 Mo d’images par message.");
+            const dataUrl = await readImageAsDataUrl(file);
+            const content = dataUrl.split(",")[1];
+            if (!content) throw new Error("Encodage de l’image impossible.");
+            added.push({ id: newId(), name, mimeType: IMAGE_TYPES[extension], size: file.size, kind: "image", content, previewUrl: dataUrl });
+            imageBytes += file.size;
+            imageCount += 1;
+            continue;
+          }
+          if (extension === "pdf") {
+            if (file.size === 0 || file.size > MAX_PDF_BYTES) throw new Error("PDF vide ou supérieur à 10 Mo.");
+            const content = await extractPdfText(file);
+            if (!content) throw new Error("Aucun texte extractible (PDF probablement scanné).");
+            if (textChars + content.length > MAX_ATTACHMENT_TEXT_CHARS) throw new Error("Le texte joint dépasse la limite de 24 000 caractères.");
+            added.push({ id: newId(), name, mimeType: "application/pdf", size: file.size, kind: "text", content });
+            textChars += content.length;
+            continue;
+          }
+          const mimeType = TEXT_FILE_TYPES[extension];
+          if (!mimeType) throw new Error("Format non pris en charge. Ajoutez un document texte, un PDF ou une image PNG/JPEG/WebP.");
+          if (file.size === 0 || file.size > 512 * 1024) throw new Error("Fichier texte vide ou supérieur à 512 Ko.");
+          const content = await file.text();
+          if (textChars + content.length > MAX_ATTACHMENT_TEXT_CHARS) throw new Error("Le texte joint dépasse la limite de 24 000 caractères.");
+          added.push({ id: newId(), name, mimeType, size: file.size, kind: "text", content });
+          textChars += content.length;
+        } catch (reason) {
+          failures.push(`${name} : ${reason instanceof Error ? reason.message : "lecture impossible."}`);
+        }
+      }
+      if (added.length) setPendingAttachments((current) => [...current, ...added]);
+      if (failures.length) setError(failures.join("\n"));
+    } finally {
+      setAttachmentBusy(false);
+    }
+  };
+
+  const onFilesSelected = (event: ChangeEvent<HTMLInputElement>) => {
+    void addAttachments(event.currentTarget.files);
+    event.currentTarget.value = "";
+  };
+
+  const removeAttachment = (id: string) => {
+    setPendingAttachments((current) => current.filter((item) => item.id !== id));
+  };
+
   const sendMessage = async (event?: FormEvent<HTMLFormElement>, prompt?: string) => {
     event?.preventDefault();
     const content = (prompt ?? input).trim();
-    if (!content || sending || !connected || !model) return;
-    const userMessage: Message = { id: newId(), role: "user", content };
+    if ((!content && !pendingAttachments.length) || sending || attachmentBusy || !connected || !model) return;
+    const submittedAttachments = pendingAttachments;
+    const messageAttachments: MessageAttachment[] = submittedAttachments.map(({ id, name, mimeType, size, kind, previewUrl }) => ({
+      id, name, mimeType, size, kind, ...(previewUrl ? { previewUrl } : {}),
+    }));
+    const userMessage: Message = {
+      id: newId(),
+      role: "user",
+      content: content || "Veuillez analyser les pièces jointes.",
+      ...(messageAttachments.length ? { attachments: messageAttachments } : {}),
+    };
     const assistantId = newId();
     const next = [...messages, userMessage];
     updateMessages(() => [...next, { id: assistantId, role: "assistant", content: "" }]);
@@ -207,6 +402,11 @@ function App() {
           agent,
           model,
           messages: next.slice(-12).map(({ role, content: text }) => ({ role, content: text })),
+          ...(submittedAttachments.length ? {
+            attachments: submittedAttachments.map(({ name, mimeType, size, kind, content: attachmentContent }) => ({
+              name, mimeType, size, kind, content: attachmentContent,
+            })),
+          } : {}),
           ...(includeEvidence && (quote || researchSources.length) ? {
             evidence: { quote, sources: researchSources },
           } : {}),
@@ -217,6 +417,7 @@ function App() {
           ? { ...item, content: item.content + text }
           : item));
       });
+      setPendingAttachments([]);
     } catch (reason) {
       const notice = reason instanceof DOMException && reason.name === "AbortError"
         ? "Génération arrêtée."
@@ -264,6 +465,51 @@ function App() {
       setError(reason instanceof Error ? reason.message : "Recherche de sources impossible.");
     } finally {
       setResearchBusy(false);
+    }
+  };
+
+  const syncLibrary = async () => {
+    setLibrarySyncing(true);
+    setLibraryError("");
+    try {
+      const response = await fetch("/api/library/sync", { method: "POST" });
+      if (!response.ok) throw new Error(await readError(response));
+      const result = await response.json() as { syncWarnings?: string[] };
+      setLibraryWarnings(result.syncWarnings ?? []);
+      await loadLibrary(libraryQuery);
+    } catch (reason) {
+      setLibraryError(reason instanceof Error ? reason.message : "Actualisation de la bibliothèque impossible.");
+    } finally {
+      setLibrarySyncing(false);
+    }
+  };
+
+  const saveLibraryItem = async (item: {
+    title: string;
+    kind: "document" | "source";
+    content?: string;
+    mimeType?: string;
+    url?: string;
+    publisher?: string;
+    publishedAt?: string;
+    snippet?: string;
+    category?: string;
+  }) => {
+    setLibraryError("");
+    try {
+      const response = await fetch("/api/library/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(item),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      await loadLibrary(libraryQuery);
+      setSuccessNotice(`« ${item.title} » ajouté à la bibliothèque financière locale.`);
+      setError("");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "Ajout à la bibliothèque impossible.";
+      setLibraryError(message);
+      setError(message);
     }
   };
 
@@ -367,10 +613,13 @@ function App() {
         </a>
         <div className="sidebar-label">ESPACE DE TRAVAIL</div>
         <button className={`nav-item ${view === "chat" ? "active" : ""}`} onClick={() => setView("chat")}>
-          <span className="nav-symbol">◌</span><span>Chat financier</span><span className="nav-count">2</span>
+          <span className="nav-symbol">◌</span><span>Chat financier</span><span className="nav-count">3</span>
         </button>
         <button className={`nav-item ${view === "build" ? "active" : ""}`} onClick={() => setView("build")}>
           <span className="nav-symbol">⌘</span><span>Agent de build</span><span className="new-badge">BÊTA</span>
+        </button>
+        <button className={`nav-item ${view === "library" ? "active" : ""}`} onClick={() => { setView("library"); void loadLibrary(); }}>
+          <span className="nav-symbol">▤</span><span>Bibliothèque</span><span className="nav-count">{libraryTotal}</span>
         </button>
         <div className="sidebar-label second-label">AGENTS FINANCE</div>
         <button className={`agent-nav ${view === "chat" && agent === "finance" ? "selected" : ""}`} onClick={() => { setView("chat"); setAgent("finance"); }}>
@@ -378,6 +627,9 @@ function App() {
         </button>
         <button className={`agent-nav ${view === "chat" && agent === "markets" ? "selected" : ""}`} onClick={() => { setView("chat"); setAgent("markets"); }}>
           <span className="agent-dot teal">⌁</span><span><strong>Marchés</strong><small>Valorisation & risque</small></span>
+        </button>
+        <button className={`agent-nav ${view === "chat" && agent === "portfolio" ? "selected" : ""}`} onClick={() => { setView("chat"); setAgent("portfolio"); }}>
+          <span className="agent-dot gold">◉</span><span><strong>Portefeuille</strong><small>Finances & risques</small></span>
         </button>
         <div className="sidebar-spacer" />
         <div className="local-card">
@@ -390,7 +642,7 @@ function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumb"><span>Aster</span><span className="crumb-slash">/</span><strong>{view === "chat" ? AGENTS[agent].title : "Agent de build"}</strong></div>
+          <div className="breadcrumb"><span>Aster</span><span className="crumb-slash">/</span><strong>{view === "chat" ? AGENTS[agent].title : view === "build" ? "Agent de build" : "Bibliothèque financière"}</strong></div>
           <div className="topbar-right">
             <label className="model-select-label" htmlFor="model-select">MODÈLE</label>
             <select id="model-select" value={model} onChange={(event) => setModel(event.target.value)} disabled={!models.length}>
@@ -414,7 +666,7 @@ function App() {
                 <form className="market-tool-form" onSubmit={(event) => void searchFinancialSources(event)}>
                   <label htmlFor="source-query">RECHERCHE DE SOURCES</label>
                   <div className="market-tool-input"><input id="source-query" value={researchQuery} onChange={(event) => setResearchQuery(event.target.value)} placeholder="Entreprise, sujet, période…" maxLength={180} /><button className="outline-button" type="submit" disabled={researchQuery.trim().length < 2 || researchBusy}>{researchBusy ? "…" : "Rechercher"}</button></div>
-                  {researchSources.length > 0 && <div className="source-results">{researchSources.map((source, index) => <article className="source-result" key={`${source.url}-${index}`}><a href={source.url} target="_blank" rel="noreferrer">{source.title} ↗</a><small>{source.publisher} · {source.publishedAt}</small>{source.snippet && <p>{source.snippet}</p>}</article>)}</div>}
+                  {researchSources.length > 0 && <div className="source-results">{researchSources.map((source, index) => <article className="source-result" key={`${source.url}-${index}`}><a href={source.url} target="_blank" rel="noreferrer">{source.title} ↗</a><small>{source.publisher} · {source.publishedAt}</small>{source.snippet && <p>{source.snippet}</p>}<button className="save-source-button" type="button" onClick={() => void saveLibraryItem({ kind: "source", title: source.title, url: source.url, publisher: source.publisher, publishedAt: source.publishedAt, snippet: source.snippet, category: "Recherche personnalisée" })}>＋ Bibliothèque</button></article>)}</div>}
                 </form>
               </div>
               <small className="market-disclaimer">Cotations fournies par Yahoo Finance, non contractuelles et susceptibles d’être différées. Recherche via Google Actualités ; vérifiez l’article original, sa date et son éditeur. Ni flux boursier garanti en temps réel ni conseil d’investissement.</small>
@@ -424,27 +676,42 @@ function App() {
                 <div className="eyebrow"><span className="eyebrow-star">✳</span> ASTER FINANCE INTELLIGENCE</div>
                 <h1>La finance, <em>en profondeur.</em></h1>
                 <p className="welcome-copy">Un espace de travail pour explorer les fondamentaux, challenger vos hypothèses et construire des analyses financières argumentées.</p>
-                <div className="agent-heading"><span className={`agent-dot large ${agent === "finance" ? "violet" : "teal"}`}>{AGENTS[agent].icon}</span><div><strong>{AGENTS[agent].title}</strong><small>{AGENTS[agent].subtitle}</small></div></div>
+                <div className="agent-heading"><span className={`agent-dot large ${agentColor}`}>{AGENTS[agent].icon}</span><div><strong>{AGENTS[agent].title}</strong><small>{AGENTS[agent].subtitle}</small></div></div>
                 <div className="prompt-grid">
                   {AGENTS[agent].prompts.map((prompt) => <button key={prompt} onClick={() => void sendMessage(undefined, prompt)} className="prompt-card"><span>↗</span>{prompt}</button>)}
                 </div>
               </div>
             ) : (
               <div className="conversation">
-                <div className="conversation-heading"><div className={`agent-dot large ${agent === "finance" ? "violet" : "teal"}`}>{AGENTS[agent].icon}</div><div><h1>{AGENTS[agent].title}</h1><p>{AGENTS[agent].subtitle}</p></div><button className="text-button" onClick={() => updateMessages(() => [])}>Nouvelle analyse</button></div>
-                {messages.map((item) => <article className={`message ${item.role}`} key={item.id}><div className="message-label">{item.role === "user" ? "VOUS" : "ASTER · " + AGENTS[agent].title.toUpperCase()}</div><div className="message-content">{item.content || (sending ? <span className="thinking">Analyse en cours<span>…</span></span> : "")}</div></article>)}
+              <div className="conversation-heading"><div className={`agent-dot large ${agentColor}`}>{AGENTS[agent].icon}</div><div><h1>{AGENTS[agent].title}</h1><p>{AGENTS[agent].subtitle}</p></div><button className="text-button" onClick={() => updateMessages(() => [])}>Nouvelle analyse</button></div>
+                {messages.map((item) => <article className={`message ${item.role}`} key={item.id}><div className="message-label">{item.role === "user" ? "VOUS" : "ASTER · " + AGENTS[agent].title.toUpperCase()}</div>{item.attachments && <div className="message-attachments">{item.attachments.map((attachment) => <div className="message-attachment" key={attachment.id}>{attachment.previewUrl ? <img src={attachment.previewUrl} alt={attachment.name} /> : <span className="file-attachment-icon">▤</span>}<span><strong>{attachment.name}</strong><small>{attachment.kind === "image" ? "Image" : attachment.mimeType === "application/pdf" ? "PDF · texte extrait" : "Document · texte inclus"}</small></span></div>)}</div>}<div className="message-content">{item.content || (sending ? <span className="thinking">Analyse en cours<span>…</span></span> : "")}</div></article>)}
                 <div ref={bottomRef} />
               </div>
             )}
             {error && <div className="error-banner" role="alert">{error}</div>}
+            {successNotice && <div className="success-banner" role="status">{successNotice}</div>}
             {!connected && <div className="setup-notice"><strong>Connecter un modèle local</strong><span>Installez Ollama, puis exécutez <code>ollama pull hf.co/QuantFactory/finance-Llama3-8B-GGUF:Q4_K_M</code> (modèle spécialisé) ou <code>ollama pull qwen2.5:3b</code> (plus léger).</span></div>}
             {connected && <div className="data-notice"><span>◉</span> Vérifiez chaque chiffre, source et hypothèse · Aucune promesse de rendement</div>}
             <form className="composer" onSubmit={(event) => void sendMessage(event)}>
-              <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={connected ? "Posez une question financière…" : statusMessage} disabled={!connected || sending} rows={2} maxLength={8000} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-              <div className="composer-bottom"><span>Entrée pour envoyer · Maj+Entrée pour aller à la ligne</span>{sending ? <button className="send-button stop-button" type="button" onClick={() => abortRef.current?.abort()}>■ Arrêter</button> : <button className="send-button" type="submit" disabled={!connected || !input.trim()}>Envoyer <span>↗</span></button>}</div>
+              <div className="composer-input-row">
+                <div className="attachment-menu-wrap">
+                  <button className="attach-button" type="button" aria-label="Ajouter une pièce jointe" aria-haspopup="menu" aria-expanded={attachmentMenuOpen} disabled={sending || attachmentBusy} onClick={() => setAttachmentMenuOpen((open) => !open)}>＋</button>
+                  {attachmentMenuOpen && <div className="attachment-menu" role="menu">
+                    <button type="button" role="menuitem" onClick={() => filesInputRef.current?.click()}>▤ <span>Fichiers</span></button>
+                    <button type="button" role="menuitem" onClick={() => imagesInputRef.current?.click()}>▧ <span>Images</span></button>
+                    <button type="button" role="menuitem" onClick={() => folderInputRef.current?.click()}>▣ <span>Dossier</span></button>
+                  </div>}
+                  <input ref={filesInputRef} className="visually-hidden" type="file" multiple accept=".pdf,.txt,.log,.md,.csv,.tsv,.json,.xml,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.sql,.yaml,.yml,.toml,.jpg,.jpeg,.png,.webp" onChange={onFilesSelected} />
+                  <input ref={imagesInputRef} className="visually-hidden" type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={onFilesSelected} />
+                  <input ref={(element) => { folderInputRef.current = element; if (element) element.setAttribute("webkitdirectory", ""); }} className="visually-hidden" type="file" multiple accept=".pdf,.txt,.log,.md,.csv,.tsv,.json,.xml,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.sql,.yaml,.yml,.toml,.jpg,.jpeg,.png,.webp" onChange={onFilesSelected} />
+                </div>
+                <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={connected ? "Posez une question financière…" : statusMessage} disabled={!connected || sending} rows={2} maxLength={8000} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+              </div>
+              {pendingAttachments.length > 0 && <div className="pending-attachments">{pendingAttachments.map((attachment) => <div className="pending-attachment" key={attachment.id}>{attachment.previewUrl ? <img src={attachment.previewUrl} alt="" /> : <span className="file-attachment-icon">▤</span>}<span><strong>{attachment.name}</strong><small>{attachment.kind === "image" ? "Image" : attachment.mimeType === "application/pdf" ? "PDF · texte extrait" : "Texte inclus"}</small>{attachment.kind === "text" && <button className="save-attachment-button" type="button" onClick={() => void saveLibraryItem({ kind: "document", title: attachment.name, content: attachment.content, mimeType: attachment.mimeType })}>Ajouter à la bibliothèque</button>}</span><button type="button" aria-label={`Retirer ${attachment.name}`} onClick={() => removeAttachment(attachment.id)} disabled={sending}>×</button></div>)}</div>}
+              <div className="composer-bottom"><span>{attachmentBusy ? "Lecture des pièces jointes…" : pendingAttachments.length ? `${pendingAttachments.length} pièce${pendingAttachments.length > 1 ? "s" : ""} jointe${pendingAttachments.length > 1 ? "s" : ""} · images : modèle compatible vision requis` : "Entrée pour envoyer · Maj+Entrée pour aller à la ligne"}</span>{sending ? <button className="send-button stop-button" type="button" onClick={() => abortRef.current?.abort()}>■ Arrêter</button> : <button className="send-button" type="submit" disabled={!connected || attachmentBusy || (!input.trim() && !pendingAttachments.length)}>Envoyer <span>↗</span></button>}</div>
             </form>
           </section>
-        ) : (
+        ) : view === "build" ? (
           <section className="build-view">
             <div className="build-intro"><div className="eyebrow"><span className="eyebrow-star">✳</span> AGENT DE BUILD · BÊTA</div><h1>Construisez avec <em>un agent.</em></h1><p>Décrivez un changement. L’agent prépare une proposition de fichier à examiner ; il ne l’écrit qu’après votre validation.</p></div>
             <div className="safety-strip"><span>◇</span><div><strong>Bac à sable local</strong><small>Pas de terminal, d’accès réseau ou de modification automatique. Les fichiers restent dans le dossier workspaces de l’application.</small></div></div>
@@ -459,6 +726,22 @@ function App() {
             {error && <div className="error-banner" role="alert">{error}</div>}
             {buildStatus && <div className="build-status">{buildStatus}</div>}
             <div className="editor-grid"><div className="editor-panel"><div className="editor-head"><span>FICHIER ACTUEL</span><code>{workspace}/{filePath}</code></div><textarea className="code-editor" aria-label="Contenu actuel du fichier" value={fileContent} onChange={(event) => setFileContent(event.target.value)} spellCheck={false} placeholder="Chargez un fichier existant, ou demandez la création d’un nouveau fichier." /></div><div className="editor-panel"><div className="editor-head"><span>PROPOSITION DE L’AGENT</span><span className="draft-label">{draft ? "À RELIRE" : "EN ATTENTE"}</span></div><textarea className="code-editor" aria-label="Proposition de l’agent" value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} placeholder="La proposition apparaîtra ici. Rien ne sera enregistré avant votre validation." /><button className="apply-button" type="button" onClick={() => void applyDraft()} disabled={!draft || buildBusy}>Appliquer cette proposition au bac à sable <span>→</span></button></div></div>
+          </section>
+        ) : (
+          <section className="library-view">
+            <div className="library-heading">
+              <div><div className="eyebrow"><span className="eyebrow-star">✳</span> BASE DE CONNAISSANCES LOCALE</div><h1>Bibliothèque <em>financière.</em></h1><p>Articles de presse financière mis à jour automatiquement et documents que vous choisissez d’ajouter. Les agents recherchent des extraits pertinents pour chaque question.</p></div>
+              <button className="outline-button library-sync-button" type="button" onClick={() => void syncLibrary()} disabled={librarySyncing}>{librarySyncing ? "Actualisation…" : "↻ Actualiser maintenant"}</button>
+            </div>
+            <div className="library-status-strip"><span>▤</span><div><strong>{libraryTotal} source{libraryTotal > 1 ? "s" : ""} enregistrée{libraryTotal > 1 ? "s" : ""}</strong><small>{libraryUpdatedAt ? `Dernière mise à jour automatique : ${new Date(libraryUpdatedAt).toLocaleString()} · prochaine prévue : ${libraryNextUpdateAt ? new Date(libraryNextUpdateAt).toLocaleString() : "—"}` : "La première synchronisation automatique démarre avec le serveur."}</small></div></div>
+            <div className="library-privacy-note">La synchronisation périodique interroge Google Actualités avec quelques sujets financiers. Les articles et documents restent des sources non vérifiées, pas une base exhaustive ni un nouveau modèle entraîné. Les requêtes de synchronisation nécessitent Internet.</div>
+            {libraryWarnings.length > 0 && <div className="error-banner" role="status">Synchronisation partielle : {libraryWarnings.join(" · ")}</div>}
+            {libraryError && <div className="error-banner" role="alert">{libraryError}</div>}
+            <label className="library-search"><span>RECHERCHER DANS LA BIBLIOTHÈQUE</span><input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Entreprise, thème ou document…" maxLength={180} /></label>
+            <div className="library-results">
+              {libraryEntries.length === 0 ? <div className="library-empty">{libraryQuery.trim() ? "Aucun élément correspondant." : "Aucune source pour le moment. La première synchronisation se termine en arrière-plan ; vous pouvez aussi lancer une actualisation ou ajouter un document depuis le bouton + du chat."}</div>
+                : libraryEntries.map((entry) => <article className="library-entry" key={entry.id}><div className="library-entry-meta"><span>{entry.category}</span><span>{entry.publisher}</span></div><h2>{entry.url ? <a href={entry.url} target="_blank" rel="noreferrer">{entry.title} ↗</a> : entry.title}</h2><p>{entry.snippet || "Document conservé dans la bibliothèque locale."}</p><small>{entry.publishedAt ? `Publié ${entry.publishedAt}` : `Ajouté ${new Date(entry.retrievedAt).toLocaleString()}`}</small></article>)}
+            </div>
           </section>
         )}
       </main>

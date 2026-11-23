@@ -1,6 +1,6 @@
 # Aster Finance Lab
 
-Application indépendante de l’ERP Antigravity, avec deux agents de conversation financière et un agent de build local.
+Application indépendante de l’ERP Antigravity, avec des agents de conversation financière, une bibliothèque locale et un agent de build.
 
 ## Prérequis
 
@@ -42,9 +42,11 @@ npm run preview
 
 - **Entreprise** : aide au diagnostic des états, marges, trésorerie, financement, stratégie et risques.
 - **Marchés** : explique valorisation, actions, obligations et scénarios. Le panneau « Données & sources » permet de consulter le dernier cours retourné par Yahoo Finance (symbole comme `AAPL`, `EURUSD=X` ou `^GSPC`) et de rechercher des articles via Google Actualités. Les résultats peuvent être ajoutés au contexte de la prochaine analyse ; l’assistant doit les traiter comme des éléments non vérifiés, pas comme des instructions.
+- **Portefeuille** : aide à explorer diversification, concentrations, exposition au risque, budget, dette et finances personnelles ; ne fournit pas de conseil personnalisé.
+- **Bibliothèque financière** : le serveur télécharge des résultats RSS Google Actualités sur trois sujets financiers au démarrage puis toutes les six heures. Les agents récupèrent automatiquement quelques extraits correspondant à la question. La page Bibliothèque permet de rechercher, consulter, ajouter des sources et examiner des documents. Dans le chat, le bouton **+** accepte des fichiers texte, CSV/JSON/code, PDF avec texte sélectionnable, images PNG/JPEG/WebP et les fichiers pris en charge d’un dossier. Les documents texte et PDF peuvent être enregistrés dans la bibliothèque locale.
 - **Agent de build** : génère une proposition pour un seul fichier à la fois. Il n’exécute aucune commande et ne modifie aucun fichier avant que l’utilisateur clique sur « Appliquer ». Les fichiers modifiables restent dans `workspaces/<projet>/`.
 
-Les appels d’IA vont au serveur Ollama de la machine (`127.0.0.1:11434`). Le serveur de l’application écoute lui aussi uniquement sur l’interface de loopback. Les conversations restent locales, mais les symboles demandés sont envoyés à Yahoo Finance et les recherches textuelles à Google Actualités ; ces fournisseurs externes peuvent recevoir ces requêtes. Les cotations sont fournies sans garantie, peuvent être différées, indisponibles ou soumises aux conditions du fournisseur : l’application n’est pas un flux boursier contractuel en temps réel. Les liens de recherche renvoient à Google Actualités ; vérifiez l’article original, sa date et son éditeur avant d’utiliser une information. Les réponses d’un modèle local peuvent être inexactes : vérifier les chiffres, les hypothèses, les dates et les sources. Aucun conseil financier personnalisé ni rendement n’est garanti.
+Les appels d’IA vont au serveur Ollama de la machine (`127.0.0.1:11434`). Le serveur de l’application écoute lui aussi uniquement sur l’interface de loopback. Les conversations restent locales, mais les symboles et recherches sont transmis à Yahoo Finance et Google Actualités. La synchronisation de la bibliothèque contacte Google Actualités. Les documents importés et le cache de bibliothèque sont stockés localement en clair dans `data/finance-library.json`; ne les utilisez pas pour des données sensibles. Les images sont transmises à Ollama et nécessitent un modèle compatible vision. Les PDF sont lus localement dans le navigateur par PDF.js ; les PDF scannés sans couche texte ne sont pas analysés. Les limites d’import sont de 10 pièces par message, 24 000 caractères de texte, 20 pages par PDF et 4 Mo par image (8 Mo d’images au total). Les cotations Yahoo sont non contractuelles et peuvent être différées : aucun flux temps réel n’est garanti. Les articles et la base de connaissances ne sont ni exhaustifs, ni audités, ni un modèle universel entraîné ; vérifiez les sources et les analyses. Aucun conseil financier personnalisé ni rendement n’est garanti.
 
 ## Limites de sécurité du prototype
 
