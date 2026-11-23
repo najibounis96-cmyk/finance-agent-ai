@@ -6,7 +6,7 @@ type Model = { name: string; size: number };
 type MessageAttachment = { id: string; name: string; mimeType: string; size: number; kind: "text" | "image"; previewUrl?: string };
 type Message = { id: string; role: "user" | "assistant"; content: string; attachments?: MessageAttachment[] };
 type PendingAttachment = MessageAttachment & { content: string };
-type Agent = "finance" | "markets" | "portfolio";
+type Agent = "general" | "finance" | "markets" | "portfolio";
 type Quote = {
   symbol: string;
   price: number;
@@ -39,6 +39,16 @@ type LibraryState = {
 };
 
 const AGENTS: Record<Agent, { title: string; subtitle: string; icon: string; prompts: string[] }> = {
+  general: {
+    title: "Assistant universel",
+    subtitle: "Réponses générales, analyse, programmation et sujets financiers",
+    icon: "✦",
+    prompts: [
+      "Explique-moi un sujet complexe avec des exemples concrets.",
+      "Analyse une entreprise, ses états financiers et ses principaux risques.",
+      "Aide-moi à résoudre un problème de programmation ou à comparer des options.",
+    ],
+  },
   finance: {
     title: "Analyste financier",
     subtitle: "États financiers, stratégie, trésorerie et décisions d’entreprise",
@@ -133,12 +143,12 @@ async function readError(response: Response) {
 
 function App() {
   const [view, setView] = useState<"chat" | "build" | "library">("chat");
-  const [agent, setAgent] = useState<Agent>("finance");
+  const [agent, setAgent] = useState<Agent>("general");
   const [models, setModels] = useState<Model[]>([]);
   const [model, setModel] = useState("");
   const [connected, setConnected] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Connexion au moteur local…");
-  const [chatSessions, setChatSessions] = useState<Record<Agent, Message[]>>({ finance: [], markets: [], portfolio: [] });
+  const [chatSessions, setChatSessions] = useState<Record<Agent, Message[]>>({ general: [], finance: [], markets: [], portfolio: [] });
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -177,7 +187,7 @@ function App() {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const libraryDebounceRef = useRef<number | null>(null);
   const messages = chatSessions[agent];
-  const agentColor = agent === "finance" ? "violet" : agent === "markets" ? "teal" : "gold";
+  const agentColor = agent === "general" ? "violet" : agent === "finance" ? "violet" : agent === "markets" ? "teal" : "gold";
   const updateMessages = (update: (current: Message[]) => Message[]) => {
     setChatSessions((current) => ({ ...current, [agent]: update(current[agent]) }));
   };
@@ -504,7 +514,7 @@ function App() {
       });
       if (!response.ok) throw new Error(await readError(response));
       await loadLibrary(libraryQuery);
-      setSuccessNotice(`« ${item.title} » ajouté à la bibliothèque financière locale.`);
+      setSuccessNotice(`« ${item.title} » ajouté à la bibliothèque universelle locale.`);
       setError("");
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Ajout à la bibliothèque impossible.";
@@ -613,7 +623,7 @@ function App() {
         </a>
         <div className="sidebar-label">ESPACE DE TRAVAIL</div>
         <button className={`nav-item ${view === "chat" ? "active" : ""}`} onClick={() => setView("chat")}>
-          <span className="nav-symbol">◌</span><span>Chat financier</span><span className="nav-count">3</span>
+          <span className="nav-symbol">◌</span><span>Chat universel</span><span className="nav-count">4</span>
         </button>
         <button className={`nav-item ${view === "build" ? "active" : ""}`} onClick={() => setView("build")}>
           <span className="nav-symbol">⌘</span><span>Agent de build</span><span className="new-badge">BÊTA</span>
@@ -621,7 +631,10 @@ function App() {
         <button className={`nav-item ${view === "library" ? "active" : ""}`} onClick={() => { setView("library"); void loadLibrary(); }}>
           <span className="nav-symbol">▤</span><span>Bibliothèque</span><span className="nav-count">{libraryTotal}</span>
         </button>
-        <div className="sidebar-label second-label">AGENTS FINANCE</div>
+        <div className="sidebar-label second-label">ASSISTANTS</div>
+        <button className={`agent-nav ${view === "chat" && agent === "general" ? "selected" : ""}`} onClick={() => { setView("chat"); setAgent("general"); }}>
+          <span className="agent-dot violet">✦</span><span><strong>Universel</strong><small>Toutes demandes</small></span>
+        </button>
         <button className={`agent-nav ${view === "chat" && agent === "finance" ? "selected" : ""}`} onClick={() => { setView("chat"); setAgent("finance"); }}>
           <span className="agent-dot violet">◈</span><span><strong>Entreprise</strong><small>Analyse financière</small></span>
         </button>
@@ -642,7 +655,7 @@ function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumb"><span>Aster</span><span className="crumb-slash">/</span><strong>{view === "chat" ? AGENTS[agent].title : view === "build" ? "Agent de build" : "Bibliothèque financière"}</strong></div>
+          <div className="breadcrumb"><span>Aster</span><span className="crumb-slash">/</span><strong>{view === "chat" ? AGENTS[agent].title : view === "build" ? "Agent de build" : "Bibliothèque universelle"}</strong></div>
           <div className="topbar-right">
             <label className="model-select-label" htmlFor="model-select">MODÈLE</label>
             <select id="model-select" value={model} onChange={(event) => setModel(event.target.value)} disabled={!models.length}>
@@ -673,9 +686,9 @@ function App() {
             </div>
             {messages.length === 0 ? (
               <div className="welcome">
-                <div className="eyebrow"><span className="eyebrow-star">✳</span> ASTER FINANCE INTELLIGENCE</div>
-                <h1>La finance, <em>en profondeur.</em></h1>
-                <p className="welcome-copy">Un espace de travail pour explorer les fondamentaux, challenger vos hypothèses et construire des analyses financières argumentées.</p>
+                <div className="eyebrow"><span className="eyebrow-star">✳</span> ASTER INTELLIGENCE</div>
+                <h1>La connaissance, <em>en profondeur.</em></h1>
+                <p className="welcome-copy">Un espace de travail pour explorer vos questions, challenger vos hypothèses et construire des analyses argumentées dans tous les domaines.</p>
                 <div className="agent-heading"><span className={`agent-dot large ${agentColor}`}>{AGENTS[agent].icon}</span><div><strong>{AGENTS[agent].title}</strong><small>{AGENTS[agent].subtitle}</small></div></div>
                 <div className="prompt-grid">
                   {AGENTS[agent].prompts.map((prompt) => <button key={prompt} onClick={() => void sendMessage(undefined, prompt)} className="prompt-card"><span>↗</span>{prompt}</button>)}
@@ -730,14 +743,14 @@ function App() {
         ) : (
           <section className="library-view">
             <div className="library-heading">
-              <div><div className="eyebrow"><span className="eyebrow-star">✳</span> BASE DE CONNAISSANCES LOCALE</div><h1>Bibliothèque <em>financière.</em></h1><p>Articles de presse financière mis à jour automatiquement et documents que vous choisissez d’ajouter. Les agents recherchent des extraits pertinents pour chaque question.</p></div>
+              <div><div className="eyebrow"><span className="eyebrow-star">✳</span> BASE DE CONNAISSANCES LOCALE</div><h1>Bibliothèque <em>universelle.</em></h1><p>Articles d’actualité généraliste mis à jour automatiquement et documents que vous choisissez d’ajouter. Les agents recherchent des extraits pertinents sur tous les sujets.</p></div>
               <button className="outline-button library-sync-button" type="button" onClick={() => void syncLibrary()} disabled={librarySyncing}>{librarySyncing ? "Actualisation…" : "↻ Actualiser maintenant"}</button>
             </div>
             <div className="library-status-strip"><span>▤</span><div><strong>{libraryTotal} source{libraryTotal > 1 ? "s" : ""} enregistrée{libraryTotal > 1 ? "s" : ""}</strong><small>{libraryUpdatedAt ? `Dernière mise à jour automatique : ${new Date(libraryUpdatedAt).toLocaleString()} · prochaine prévue : ${libraryNextUpdateAt ? new Date(libraryNextUpdateAt).toLocaleString() : "—"}` : "La première synchronisation automatique démarre avec le serveur."}</small></div></div>
-            <div className="library-privacy-note">La synchronisation périodique interroge Google Actualités avec quelques sujets financiers. Les articles et documents restent des sources non vérifiées, pas une base exhaustive ni un nouveau modèle entraîné. Les requêtes de synchronisation nécessitent Internet.</div>
+            <div className="library-privacy-note">La synchronisation périodique interroge Google Actualités sur l’actualité générale, la science, la technologie, la culture, la santé, l’environnement, le travail et l’économie. Les articles et documents restent des sources non vérifiées, pas une base exhaustive ni un nouveau modèle entraîné. Les requêtes de synchronisation nécessitent Internet.</div>
             {libraryWarnings.length > 0 && <div className="error-banner" role="status">Synchronisation partielle : {libraryWarnings.join(" · ")}</div>}
             {libraryError && <div className="error-banner" role="alert">{libraryError}</div>}
-            <label className="library-search"><span>RECHERCHER DANS LA BIBLIOTHÈQUE</span><input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Entreprise, thème ou document…" maxLength={180} /></label>
+            <label className="library-search"><span>RECHERCHER DANS LA BIBLIOTHÈQUE</span><input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Sujet, science, culture, technologie, document…" maxLength={180} /></label>
             <div className="library-results">
               {libraryEntries.length === 0 ? <div className="library-empty">{libraryQuery.trim() ? "Aucun élément correspondant." : "Aucune source pour le moment. La première synchronisation se termine en arrière-plan ; vous pouvez aussi lancer une actualisation ou ajouter un document depuis le bouton + du chat."}</div>
                 : libraryEntries.map((entry) => <article className="library-entry" key={entry.id}><div className="library-entry-meta"><span>{entry.category}</span><span>{entry.publisher}</span></div><h2>{entry.url ? <a href={entry.url} target="_blank" rel="noreferrer">{entry.title} ↗</a> : entry.title}</h2><p>{entry.snippet || "Document conservé dans la bibliothèque locale."}</p><small>{entry.publishedAt ? `Publié ${entry.publishedAt}` : `Ajouté ${new Date(entry.retrievedAt).toLocaleString()}`}</small></article>)}
